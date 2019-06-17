@@ -1,0 +1,59 @@
+---
+---
+
+@import "minima";
+
+// body {
+//   background: #121212;
+//   color: #fff;
+// }
+
+// .site-title {
+//   color: #fff;
+// }
+
+// how do i into responsive design
+// web dev sux
+@media only screen and (min-width: 992px) {
+  .wrapper {
+    max-width: calc(960px - (30px * 2));
+  }
+}
+
+@media only screen and (min-width: 1200px) {
+  .wrapper {
+    max-width: calc(1200px - (30px * 2));
+  }
+}
+
+pre, code, .highlight {
+  background: none;
+}
+
+code {
+  font-family: Monaco, Bitstream Vera Sans Mono, Lucida Console, Terminal, monospace;
+  color:#efefef;
+  font-size:13px;
+  margin: 0 4px;
+  padding: 4px 6px;
+  border-radius: 2px;
+  background: #191919;
+  border:1px solid #121212;
+}
+
+pre {
+  padding:8px 15px;
+  background: #191919;
+  border-radius: 2px;
+  border:1px solid #121212;
+  box-shadow: inset 0 1px 3px rgba(0,0,0,.3);
+  overflow: auto;
+  overflow-y: hidden;
+
+  code {
+    color: #efefef;
+    text-shadow: 0px 1px 0px #000;
+    margin: 0;
+    padding: 0;
+  }
+}
