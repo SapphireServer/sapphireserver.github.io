@@ -1,23 +1,49 @@
 /**
+ * Code formatting
+ */
+pre,
+code {
+  @include relative-font-size(0.9375);
+  border: 1px solid $grey-color-light;
+  background-color: #eef;
+}
+
+code {
+  padding: 0;
+}
+
+pre {
+  padding: 8px 12px;
+  overflow-x: auto;
+
+  > code {
+    border: 0;
+    padding-right: 0;
+    padding-left: 0;
+  }
+}
+
+/**
  * Syntax highlighting styles
  */
 .highlight {
   background: #fff;
   @extend %vertical-rhythm;
+  border-radius: 4px;
 
   table td { padding: 5px; }
   table pre { margin: 0; }
 
   .highlighter-rouge & {
-    background: #eef;
+    background: #191919;
   }
 
   .highlight, .w {
-    color: #d0d0d0;
+    color: #191919;
   }
   .err {
-    color: #151515;
-    background-color: #ac4142;
+    color: #ac4142;
+    /*background-color: #ac4142;*/
   }
   .c, .cd, .cm, .c1, .cs {
     color: #888;
@@ -35,10 +61,10 @@
     color: #d0d0d0;
   }
   .gi {
-    color: #90a959;
+    color: #7aa959;
   }
   .gd {
-    color: #ac4142;
+    color: #ce4f51;
   }
   .gh {
     color: #6a9fb5;
@@ -57,7 +83,7 @@
     color: #d28445;
   }
   .s, .sb, .sc, .sd, .s2, .sh, .sx, .s1 {
-    color: #90a959;
+    color: #7aa959;
   }
   .sr {
     color: #75b5aa;
