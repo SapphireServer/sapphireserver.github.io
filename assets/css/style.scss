@@ -108,6 +108,20 @@ a, a:visited, a:hover {
   color: #3ea4ff;
 }
 
+/* this is some retarded shit */
+h2, h3, h4, h5 {
+  .anchor {
+    &, &:hover, &:visited {
+      color: #ddd;
+    }
+  }
+
+  span {
+    color: #6e6e6e;
+    font-size: 90%;
+  }
+}
+
 code {
   font-family: Monaco, Bitstream Vera Sans Mono, Lucida Console, Terminal, monospace;
   color:#efefef;
