@@ -805,4 +805,266 @@ Unlikely to be the same thing but decided to humour myself and go check, and it'
 
 #### Building Handler Trees
 
-Coming soon™
+This shit is actually pretty cursed, so what I'm going to do is paste a heap of code and then make it slightly more digestible. I also don't want to spend more time on this because it hurts the soul and maybe with what we have, we might be able to get somewhere somewhat reliably.
+
+```python
+def ea_to_rva(ea):
+    return ea - idaapi.get_imagebase()
+
+def get_bytes_str(start_ea, end_ea):
+    size = end_ea - start_ea
+
+    bytes = []
+    for ea in range(start_ea, end_ea):
+        b = '{:02x}'.format(ida_bytes.get_byte(ea))
+        bytes.append(b)
+
+    return ' '.join(bytes)
+
+def get_func_name(ea):
+    name = ida_funcs.get_func_name(ea)
+    demangled = ida_name.demangle_name(name, idc.get_inf_attr(idc.INF_LONG_DN))
+
+    return demangled or name
+
+def postprocess_func(fn, depth = 0):
+    func = {
+        'ea': fn.startEA,
+        'rva': ea_to_rva(fn.startEA),
+        'body': get_bytes_str(fn.startEA, fn.endEA)
+    }
+
+    # total aids
+    switch_ea, switch = find_switch(fn.startEA)
+
+    if switch and switch_ea != main_jumptable:
+        sw = func['switch'] = {}
+
+        res = idaapi.calc_switch_cases(switch_ea, switch)
+        
+        case_ids = []
+        for case in res.cases:
+            for i in case:
+                case_ids.append(int(i))
+
+        sw['cases'] = [i for i in set(case_ids)]
+
+    else:
+        func['switch'] = None
+
+    return func
+
+def process_func(func, start_ea, end_ea):
+    for head in idautils.Heads(start_ea, end_ea):
+        flags = idaapi.getFlags(head)
+        if idaapi.isCode(flags):
+
+            mnem = idc.GetMnem(head)
+
+            if mnem == 'call' or mnem == 'jmp':
+                op_ea = idc.GetOperandValue(head, 0)
+                fn = ida_funcs.get_func(op_ea)
+
+                if fn:
+                    fn_info = postprocess_func(fn)
+
+                    if fn_info:
+                        func['xrefs'][get_func_name(op_ea)] = fn_info
+
+def process_case(case, id):
+    func = case['func'] = {}
+    body = func['body'] = get_bytes_str(case['start_ea'], case['end_ea'])
+    func['xrefs'] = {}
+
+    process_func(func, case['start_ea'], case['end_ea'])
+
+
+
+def run():
+    # [same as before]
+
+    # find switch
+    head, switch = find_switch(func_ea)
+
+    global main_jumptable
+    main_jumptable = head
+
+    # [also same as before]
+
+    for k, v in enumerate(case_infos):
+        process_case(v, k)
+```
+
+Don't say I didn't warn you. Anyway, `run()` is basically the same thing with a few minor changes.
+
+* We store the EA of the jumptable inside `ZoneDownHandler` so we don't duplicate it in the event that we are inside a case that refers to itself. Mainly because its just more junk to output that we really don't need
+* We loop over each `case_info` dictionary that we created before and do things...
+
+... so we'll start from `process_case(...)` and go from there:
+
+```python
+def process_case(case, id):
+    func = case['func'] = {}
+    body = func['body'] = get_bytes_str(case['start_ea'], case['end_ea'])
+    func['calls'] = {}
+
+    process_func(func, case['start_ea'], case['end_ea'])
+```
+
+`process_case(...)` is pretty self explanatory, pretty much just sets up a dictionary and passes the ref through with the start and end EA of the segment of code we'll look at. We also get all the bytes of the case segment as a string, meaning this disassembly: 
+
+```
+loc_140F6ED28:                          ; CODE XREF: Client__Network__ZoneDownHandler+46↑j
+                                         ; DATA XREF: Client__Network__ZoneDownHandler:jpt_140F6ED26↓o
+                 xor     r8d, r8d        ; jumptable 0000000140F6ED26 case 125
+                 mov     rdx, rdi
+                 lea     ecx, [r8+8]
+                 mov     rbx, [rsp+58h+arg_0]
+                 mov     rsi, [rsp+58h+arg_10]
+                 add     rsp, 50h
+                 pop     rdi
+                 jmp     net__somegenericweirdshit
+```
+
+Becomes this in the output:
+
+```json
+"body":"45 33 c0 48 8b d7 41 8d 48 08 48 8b 5c 24 60 48 8b 74 24 70 48 83 c4 50 5f e9 7a 40 00 00"
+```
+
+Nothing too complex, but there's a possible 'improvement' with this. Currently all references to data and so on is preserved as is, so in the event of the executable being rebuilt, it's very likely that some of the bytes in here will change. What's probably a good idea to do is to replace references to data and code with wildcards, so we know that during the processing step wildcards can be completely ignored and subsequently if then any of the remaining bytes change, there's either a code change or it's not the same thing. But we can cross that bridge later.
+
+Moving on...
+
+```python
+def process_func(func, start_ea, end_ea):
+    for head in idautils.Heads(start_ea, end_ea):
+        flags = idaapi.getFlags(head)
+        if idaapi.isCode(flags):
+
+            mnem = idc.GetMnem(head)
+
+            if mnem == 'call' or mnem == 'jmp':
+                op_ea = idc.GetOperandValue(head, 0)
+                fn = ida_funcs.get_func(op_ea)
+
+                if fn:
+                    fn_info = postprocess_func(fn)
+
+                    if fn_info:
+                        func['calls'][get_func_name(op_ea)] = fn_info
+```
+
+This is where it starts getting fucked. So, again, this is how it goes:
+
+1. Loop over every instruction in the range `start_ea ... end_ea`
+2. Check if it's actually code, though the check is probably redundant in this case and I think something I left in from before, its all a blur now
+3. Get the mnemonic by name and check if it's a `call` or `jmp` instruction
+4. If it is, we get the first operand value, or the instructions parameter -- in this case it should be the EA of a function
+5. Call `get_func` on it and check if it actually is a function -- it returns `None` if its not
+6. Do more shit with that function (see below)
+7. Store the result in the dictionary keyed by the function name
+
+Not totally indigestible, but it's pretty gnarly. So lets make it even worse and check out `postprocess_func`!
+
+```python
+def postprocess_func(fn, depth = 0):
+    func = {
+        'ea': fn.startEA,
+        'rva': ea_to_rva(fn.startEA),
+        'body': get_bytes_str(fn.startEA, fn.endEA)
+    }
+
+    # total aids
+    switch_ea, switch = find_switch(fn.startEA)
+
+    if switch and switch_ea != main_jumptable:
+        sw = func['switch'] = {}
+
+        res = idaapi.calc_switch_cases(switch_ea, switch)
+        
+        case_ids = []
+        for case in res.cases:
+            for i in case:
+                case_ids.append(int(i))
+
+        sw['cases'] = [i for i in set(case_ids)]
+
+    else:
+        func['switch'] = None
+
+    return func
+```
+
+There's not anything 'new' here but it's pretty gross nonetheless. For the most part though, this is simply an isolated function where we can do everything later without being trapped in 60 layers of indentation. Check if we have a switch in the function, if we do, grab some info about it and then attach it to the `func` dictionary.
+
+Something we could do here is grab the bytes of each case in the nested switches, so we can then distinguish nested switches at the same time but we'll come back to this later. I don't want to be battling this stupid shit without the easier stuff working properly first.
+
+#### I Can't Believe That Writing JSON to the Clipboard Deserves It's Own Section
+
+Now we'll export all this garbage and throw it into the clipboard so you can do things with it. Luckily this is actually pretty easy:
+
+```python
+from PyQt5.Qt import QApplication
+
+def set_clipboard(data):
+    QApplication.clipboard().setText(data)
+
+def set_clipboard_json(data):
+    set_clipboard(json.dumps(data, indent=2, separators=(',', ':')))
+    log('copied parsed data to clipboard')
+```
+
+[Wow](https://www.youtube.com/watch?v=TRIwAHX3aHM). At the end of `run()`, just insert `set_clipboard_json(output)` and away you go. You'll get something like this, or maybe better if you're less retarded than I am:
+
+```json
+{
+  "rva":16182568,
+  "func":{
+    "body":"45 33 c0 48 8b d7 41 8d 48 08 48 8b 5c 24 60 48 8b 74 24 70 48 83 c4 50 5f e9 7a 40 00 00",
+    "calls":{
+      "net::somegenericweirdshit":{
+        "body":"48 89 5c 24 08 48 89 74 24 10 57 48 83 ec 20 8b f1 41 8b d8 48 8b 0d 4d 87 b9 00 48 8b fa e8 8d ce 11 ff 48 85 c0 74 15 4c 8b 10 4c 8b cf 44 8b c3 8b d6 48 8b c8 41 ff 92 90 02 00 00 48 8b 5c 24 30 48 8b 74 24 38 48 83 c4 20 5f c3",
+        "rva":16199104,
+        "ea":5384908224,
+        "switch":null
+      }
+    }
+  },
+  "rel_ea":72,
+  "opcodes":[
+    125
+  ],
+  "start_ea":5384891688,
+  "end_ea":5384891718,
+  "size":30
+}
+```
+
+And just to compare, here's the 5.15 equivalent:
+
+```json
+{
+  "rva":16818872,
+  "func":{
+    "body":"b9 08 00 00 00 48 8b d7 45 33 c0 48 8b 5c 24 60 48 8b 74 24 70 48 83 c4 50 5f e9 39 47 00 00",
+    "calls":{
+      "sub_14100EA10":{
+        "body":"48 89 5c 24 08 48 89 74 24 10 57 48 83 ec 20 8b f1 41 8b d8 48 8b 0d 7d 3c bd 00 48 8b fa e8 ed 16 08 ff 48 85 c0 74 15 4c 8b 10 4c 8b cf 44 8b c3 8b d6 48 8b c8 41 ff 92 a0 02 00 00 48 8b 5c 24 30 48 8b 74 24 38 48 83 c4 20 5f c3",
+        "rva":16837136,
+        "ea":5385546256,
+        "switch":null
+      }
+    }
+  },
+  "rel_ea":72,
+  "opcodes":[
+    893
+  ],
+  "start_ea":5385527992,
+  "end_ea":5385528023,
+  "size":31
+}
+```
+
+As mentioned already, there's a few ways this can be improved but for now this should work as a proof of concept.
