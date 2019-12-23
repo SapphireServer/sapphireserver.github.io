@@ -137,7 +137,7 @@ pre {
   }
 }
 
-.post-content img {
+.post-content img:not(.emoji) {
   display:block;
     margin:auto;
 }
