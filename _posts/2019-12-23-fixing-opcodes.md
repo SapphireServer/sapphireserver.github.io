@@ -1069,7 +1069,7 @@ And just to compare, here's the 5.15 equivalent:
 
 As mentioned already, there's a few ways this can be improved but for now this should work as a proof of concept.
 
-#### Automating Client Opcode Correction
+#### Automating Server Opcode Correction
 
 This is the part where it gets spicy. But we'll quickly refresh a couple things we learnt a while back:
 
