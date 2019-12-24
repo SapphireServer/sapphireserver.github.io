@@ -1068,3 +1068,257 @@ And just to compare, here's the 5.15 equivalent:
 ```
 
 As mentioned already, there's a few ways this can be improved but for now this should work as a proof of concept.
+
+#### Automating Client Opcode Correction
+
+This is the part where it gets spicy. But we'll quickly refresh a couple things we learnt a while back:
+
+* The order of switch cases is mostly preserved
+* Switch case code doesn't change much (or at all)
+
+For a quick proof of concept, we'll only attempt to do the first one now and see if we can get something usable. Make sure you've got the JSON that the script spits out saved somewhere. I'm gonna do the thing where I post a bunch of ~~surprisingly~~ working code and then go through it.
+
+```python
+import json
+import sys
+
+import requests
+import CppHeaderParser
+
+#### config/settings/garbage
+
+fucked_distance = 0xffffffff
+max_size_diff = 10
+
+#### end config shit
+
+if len(sys.argv) != 3:
+    print('missing args: [old exe schema] [new exe schema]')
+    sys.exit(1)
+
+with open(sys.argv[1]) as f:
+    old_schema = json.load(f)
+
+with open(sys.argv[2]) as f:
+    new_schema = json.load(f)
+
+# print revs
+print('old client rev: %s' % old_schema['clean_rev'])
+print('new client rev: %s' % new_schema['clean_rev'])
+
+# fetch name hinting file for old rev
+if old_schema['ipcs_file']:
+    print('have ipcs_file in client schema, downloading symbols: %s' % old_schema['ipcs_file'])
+    ipcs_data = requests.get(old_schema['ipcs_file'])
+
+    if ipcs_data.status_code == 200:
+        header = CppHeaderParser.CppHeader(ipcs_data.text, argType="string")
+
+opcodes_found = []
+
+# newlines for the autism
+print()
+
+def get_opcode_by_val(enum_name, opcode):
+    for enum in header.enums:
+        if enum['name'] == enum_name:
+            # find enum value
+            for val in enum['values']:
+                if val['value'] == opcode:
+                    return val['name']
+
+    return "Unknown"
+
+def find_close_numeric(objs, dest, getter):
+    closest = fucked_distance
+    closest_obj = None
+
+    for obj in objs:
+        val = getter(obj)
+
+        num = abs(val - dest)
+
+        if num < closest:
+            closest = num
+            closest_obj = obj
+
+    return (closest, closest_obj)
+
+def find_in(objs, expr):
+    for obj in objs:
+        if expr(obj):
+            return obj
+
+    return None
+
+def get_opcodes_str(opcodes):
+    return ', '.join([hex(o) for o in opcodes])
+
+def add_match_case(cases, case):
+    # check if case already exists
+
+    for c in cases:
+        if c['rel_ea'] == case['rel_ea']:
+            return
+
+    cases.append(case)
+
+for k, case in enumerate(old_schema['cases']):
+    old_opcodes = case['opcodes']
+    print('finding opcode(s): %s' % get_opcodes_str(old_opcodes))
+
+    matched_handlers = []
+
+    # see if we can get a match for the relative ea first
+    dist, dist_match = find_close_numeric(new_schema['cases'], case['rel_ea'], lambda obj : obj['rel_ea'])
+    size_diff = abs(dist_match['size'] - case['size'])
+    #print('  os: %d ns: %d d: %d' % (dist_match['size'], case['size'], size_diff))
+
+    if dist == fucked_distance:
+        print('  got fucked distance, what?')
+        continue
+
+    order_match = new_schema['cases'][k]
+
+    # see if the rva matches for the cases found by the distance and order
+    if dist_match['rel_ea'] == order_match['rel_ea'] and size_diff < max_size_diff:
+
+        print('  got order match, size diff: %d < %d' % (size_diff, max_size_diff))
+
+        # check if calls count match in found match & og code
+        if len(case['func']['calls']) == len(order_match['func']['calls']):
+            print('  has nested callcount match')
+            
+        add_match_case(matched_handlers, order_match)
+
+
+    matched = len(matched_handlers)
+    if matched == 1:
+        # holy shit
+        opcodes_found.append((old_opcodes, matched_handlers[0]['opcodes']))
+    elif matched > 1:
+        print('  found %d matching handlers' % matched)
+
+
+    #break
+
+# dump found shit
+print()
+
+for k, v in enumerate(opcodes_found):
+    old, new = v
+    print('branch %d' % k)
+
+    old = ', '.join(['%s (%s)' % (hex(o), get_opcode_by_val('ServerZoneIpcType', o)) for o in old])
+
+    print(' - old: %s' % old)
+    print(' - new: %s' % get_opcodes_str(new))
+
+print('found %d/%d opcode branches!' % (len(opcodes_found), len(old_schema['cases'])))
+```
+
+Something to note quickly, if you set the `ipcs_file` key in the old client schema, it'll fetch the header file, parse it and give you symbols.
+
+```json
+"ipcs_file": "https://raw.githubusercontent.com/SapphireServer/Sapphire/v5.08/src/common/Network/PacketDef/Ipcs.h"
+```
+
+With that out of the way, we can talk about cool shit now. Does it work? Well, yes and no. What it gives you already is pretty accurate and I think there's only a couple that it 'finds' that aren't correct, though I haven't gone and actually checked said opcodes myself.
+
+Anyway, so lets go through how it works.
+
+```python
+dist, dist_match = find_close_numeric(new_schema['cases'], case['rel_ea'], lambda obj : obj['rel_ea'])
+
+size_diff = abs(dist_match['size'] - case['size'])
+```
+
+This uses patent pending technology to find a case in the new executable schema which has the smallest delta between RVAs. One of the differences between the 5.0 and 5.15 executable is that some cases grew by 1~5 bytes, so you can't look up a case by its RVA alone, so we need to find the closest one. We also calculate the size difference between the distance match and the origin case in the original executable. It's _probably_ unlikely that something that grew by more than a few bytes is the same handler.
+
+```python
+order_match = new_schema['cases'][k]
+```
+
+This is pretty dumb but it's in there so why not, but basically we grab the case in the new executable which is in the same place, so order still matters but nothing else does. This probably needs fixing though because I'm not sure if python will reliably spit out arrays in the same order. Seems to work though. Probably crashes if you have less elements in the new schema, but I like to live on the edge.
+
+```python
+    # see if the rva matches for the cases found by the distance and order
+    if dist_match['rel_ea'] == order_match['rel_ea'] and size_diff < max_size_diff:
+
+        print('  got order match, size diff: %d < %d' % (size_diff, max_size_diff))
+
+        # check if calls count match in found match & og code
+        if len(case['func']['calls']) == len(order_match['func']['calls']):
+            print('  has nested callcount match')
+            
+        add_match_case(matched_handlers, order_match)
+```
+
+This is the first _real_ check we do and it's actually pretty decent in terms of it giving you good results. First we check if the distance match is also the order match and discard any others (for now) and that the size hasn't changed more than 10 bytes. Reason for this is that I was getting slightly more inconsistent results both just by checking the distance alone, so I figured it'd be a decent idea to check the order as well. `size_diff` also filters out a couple bad cases that looked obviously wrong.
+
+Following that there's a quick check to see if the nested call count matches, though it doesn't serve any purpose at the moment other than a quick test. Currently, everything that this finds has an exact nested call count match, which is pretty nice. The idea I have in the back of my mind is that you have a bunch of isolated checks which will find the 'best' matching candidates with a confidence score, then you loop over each matching candidate, pick the best scoring one and then print those opcodes out.
+
+Example:
+
+```
+branch 2
+ - old: 0x77 (Logout)
+ - new: 0x12d
+branch 3
+ - old: 0x100 (Playtime)
+ - new: 0x2fa
+branch 4
+ - old: 0x104 (Chat)
+ - new: 0x1d0
+...
+branch 10
+ - old: 0x17f (PlayerSpawn)
+ - new: 0xdc
+branch 11
+ - old: 0x180 (NpcSpawn)
+ - new: 0x219
+branch 12
+ - old: 0x181 (NpcSpawn2)
+ - new: 0x304
+branch 13
+ - old: 0x191 (ActorFreeSpawn)
+ - new: 0x32b
+branch 14
+ - old: 0x165 (PersistantEffect)
+ - new: 0x339
+branch 15
+ - old: 0x184 (ActorSetPos)
+ - new: 0x296
+branch 16
+ - old: 0x182 (ActorMove)
+ - new: 0x1ad
+...
+branch 27
+ - old: 0x15e (Effect)
+ - new: 0x2aa
+branch 28
+ - old: 0x161 (AoeEffect8)
+ - new: 0xb3
+branch 29
+ - old: 0x162 (AoeEffect16)
+ - new: 0xe6
+branch 30
+ - old: 0x163 (AoeEffect24)
+ - new: 0x10a
+branch 31
+ - old: 0x164 (AoeEffect32)
+ - new: 0x1c8
+branch 32
+ - old: 0x142 (ActorControl)
+ - new: 0x12f
+branch 33
+ - old: 0x144 (ActorControlTarget)
+ - new: 0x1b3
+branch 34
+ - old: 0x143 (ActorControlSelf)
+ - new: 0x201
+...
+found 73/401 opcode branches!
+```
+
+Hand picked quite a few here, but these ones are actually correct which is honestly pretty impressive for such a naive implementation. That said, the ones I think are 'wrong' probably need to be manually checked, but I'd say that 90% of the ones it finds, so ~67 or so opcode cases are correct and it's selected the right handler which is honestly impressive for how awful this garbage is.
